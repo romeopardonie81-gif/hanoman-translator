@@ -100,6 +100,14 @@
   .filechip .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
   .formats { margin: -6px 4px 0; }
   #sourceCard.dragover { border-color: var(--indigo); box-shadow: 0 0 0 3px color-mix(in srgb, var(--indigo) 30%, transparent); }
+  .quota { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px;
+           display: flex; flex-direction: column; gap: 6px; }
+  .quota p { margin: 0; }
+  .quotarow { display: flex; gap: 8px; }
+  .quotarow input { flex: 1; min-width: 0; font: inherit; padding: 8px 12px; border-radius: 10px;
+                    border: 1px solid var(--line); background: var(--paper); color: var(--ink); }
+  #saveEmail { border: 0; border-radius: 10px; padding: 8px 14px; background: var(--indigo); color: var(--indigo-ink); }
+  .quota.attention { border-color: var(--marigold); box-shadow: 0 0 0 3px color-mix(in srgb, var(--marigold) 35%, transparent); }
   .install { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin: 0; }
   @media (prefers-reduced-motion: reduce) { #swap { transition: none; } }
 </style>
@@ -149,6 +157,15 @@
       <button class="ghost" id="speakOut" aria-label="Dengarkan hasil terjemahan">🔊</button>
       <button class="ghost" id="copy">Salin</button>
       <button class="ghost" id="download">Unduh .txt</button>
+    </div>
+  </div>
+
+  <div class="quota" id="quotaBox">
+    <p><b>Kuota terjemahan</b> <span class="muted" id="quotaStatus"></span></p>
+    <p class="muted">Tanpa email: ±5.000 karakter/hari. Dengan email: ±50.000 karakter/hari. Email hanya disimpan di HP ini dan dikirim ke layanan terjemahan MyMemory.</p>
+    <div class="quotarow">
+      <input type="email" id="email" placeholder="email@contoh.com" autocomplete="email" inputmode="email">
+      <button id="saveEmail">Simpan</button>
     </div>
   </div>
 
@@ -355,15 +372,45 @@ function chunk(text, max = 450) {
   return chunks;
 }
 
+// Email opsional: MyMemory memberi kuota harian 10x lebih besar bila permintaan menyertakan email
+function loadEmail() { try { return localStorage.getItem("email") || ""; } catch { return ""; } }
+function renderQuota() {
+  const email = loadEmail();
+  $("email").value = email;
+  $("quotaStatus").textContent = email ? "· ±50.000 karakter/hari ✓" : "· ±5.000 karakter/hari";
+}
+$("saveEmail").onclick = () => {
+  const email = $("email").value.trim();
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setNote("Format email belum benar.", true); return; }
+  try { email ? localStorage.setItem("email", email) : localStorage.removeItem("email"); } catch {}
+  renderQuota();
+  $("quotaBox").classList.remove("attention");
+  setNote(email ? "Email tersimpan. Kuota harian sekarang ±50.000 karakter." : "Email dihapus.");
+};
+renderQuota();
+
+class QuotaError extends Error {}
+function quotaMessage() {
+  return loadEmail()
+    ? "Kuota harian (±50.000 karakter) habis. Kuota pulih besok."
+    : "Kuota harian habis. Isi email di bagian Kuota terjemahan supaya kuota naik 10x.";
+}
+
 async function translateChunk(q, pair) {
   if (!q.trim()) return q;
-  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=${pair.from}|${pair.to}`;
+  const email = loadEmail();
+  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=${pair.from}|${pair.to}`
+    + (email ? `&de=${encodeURIComponent(email)}` : "");
   const res = await fetch(url);
-  if (!res.ok) throw new Error(res.status === 429 ? "Kuota harian habis. Coba lagi besok." : "Layanan terjemahan sedang bermasalah.");
+  if (res.status === 429) throw new QuotaError(quotaMessage());
+  if (!res.ok) throw new Error("Layanan terjemahan sedang bermasalah.");
   const data = await res.json();
-  if (data.responseStatus !== 200) {
-    throw new Error(/QUOTA|LIMIT/i.test(data.responseDetails || "") ? "Kuota harian habis. Coba lagi besok." : "Gagal menerjemahkan. Coba lagi.");
+  const translated = data.responseData?.translatedText || "";
+  // Saat kuota habis MyMemory kadang tetap menjawab, tapi isinya teks peringatan
+  if (/MYMEMORY WARNING|USED ALL AVAILABLE FREE|QUOTA/i.test(`${data.responseDetails || ""} ${translated}`)) {
+    throw new QuotaError(quotaMessage());
   }
+  if (data.responseStatus !== 200) throw new Error("Gagal menerjemahkan. Coba lagi.");
   const lead = q.match(/^\s*/)[0], trail = q.match(/\s*$/)[0];
   return lead + data.responseData.translatedText.trim() + trail;
 }
@@ -395,6 +442,7 @@ async function translate() {
     addHistory({ src: text, dst: result, ...pair });
   } catch (e) {
     if (id !== reqId) return;
+    if (e instanceof QuotaError && !loadEmail()) $("quotaBox").classList.add("attention");
     setNote(e instanceof TypeError ? "Tidak bisa terhubung. Cek internet kamu." : e.message, true);
   } finally {
     if (id === reqId) { $("go").disabled = false; $("go").textContent = "Terjemahkan"; }
